@@ -1,78 +1,91 @@
 import os
 import sys
-import time
-import requests
 import asyncio
+import requests
 import schedule
-from dotenv import load_dotenv
+import time
+from telegram import Bot
 from telegram.ext import Application
 
-# Muat variabel dari .env
-load_dotenv()
+# Setup logging
+import logging
+logging.basicConfig(
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
+# Config
 TOKEN = os.getenv("TOKEN")
-CHAT_ID_RAW = os.getenv("CHAT_ID")
+CHAT_ID = os.getenv("CHAT_ID")
 
-if not TOKEN or not CHAT_ID_RAW:
-    print("❌ TOKEN atau CHAT_ID belum diset di file .env")
+if not TOKEN or not CHAT_ID:
+    logger.error("Token atau Chat ID tidak ditemukan!")
     sys.exit(1)
 
-try:
-    CHAT_ID = int(CHAT_ID_RAW)
-except ValueError:
-    print("❌ CHAT_ID harus berupa angka.")
-    sys.exit(1)
-
+# Bot setup
 application = Application.builder().token(TOKEN).build()
 
-def get_domain_list():
+async def kirim_status():
+    try:
+        waktu = time.strftime("%d-%m-%Y %H:%M:%S")
+        await application.bot.send_message(
+            chat_id=CHAT_ID,
+            text=f"🤖 *Bot Aktif* berjalan normal!",
+            parse_mode="Markdown"
+        )
+        logger.info("Status bot terkirim")
+    except Exception as e:
+        logger.error(f"Gagal kirim status: {e}")
+
+def baca_domain():
     try:
         with open("domain.txt", "r") as f:
-            domains = [line.strip() for line in f if line.strip()]
-            if not domains:
-                print("❌ domain.txt kosong! Harap isi dulu sebelum menjalankan bot.")
-                sys.exit(1)
-            print("📄 Domain yang dibaca:", domains)
-            return domains
-    except FileNotFoundError:
-        print("❌ File domain.txt tidak ditemukan. Harap buat file tersebut.")
-        sys.exit(1)
+            return [line.strip() for line in f if line.strip()]
     except Exception as e:
-        print(f"❌ Gagal membaca domain.txt: {e}")
-        sys.exit(1)
+        logger.error(f"Error baca domain: {e}")
+        return []
 
-async def cek_blokir():
-    domains = get_domain_list()
-    pesan = []
+async def cek_domain():
+    domains = baca_domain()
+    if not domains:
+        return
 
+    hasil = []
     for domain in domains:
-        url = f'https://check.skiddle.id/?domains={domain}'
         try:
-            response = requests.get(url, timeout=5)
-            data = response.json()
-            print(f"🔍 Cek {domain}: {data}")
-            if data.get(domain, {}).get("blocked", False):
-                pesan.append(f"🚫 *{domain}* kemungkinan diblokir.")
+            response = requests.get(f'https://check.skiddle.id/?domains={domain}', timeout=10)
+            if response.json().get(domain, {}).get("blocked", False):
+                hasil.append(f"🚫 *{domain}* nawala!")
         except Exception as e:
-            pesan.append(f"⚠️ Gagal cek {domain}: {e}")
+            logger.error(f"Error cek {domain}: {e}")
 
-    if pesan:
-        try:
-            await application.bot.send_message(chat_id=CHAT_ID, text="\n".join(pesan), parse_mode="Markdown")
-            print("✅ Pesan dikirim.")
-        except Exception as e:
-            print(f"❌ Gagal kirim pesan Telegram: {e}")
+    if hasil:
+        await application.bot.send_message(
+            chat_id=CHAT_ID,
+            text="\n".join(hasil),
+            parse_mode="Markdown"
+        )
+        logger.info(f"Status domain terkirim: {', '.join(hasil)}")
     else:
-        print("✅ Tidak ada domain yang diblokir.")
+        logger.info("Tidak ada domain yang terblokir.")
 
-    print("🕒 Cek selesai:", time.strftime("%Y-%m-%d %H:%M:%S"))
+async def tugas_utama():
+    # Jadwalkan tugas
+    schedule.every(1).minutes.do(lambda: asyncio.create_task(cek_domain()))
+    schedule.every(1).hours.do(lambda: asyncio.create_task(kirim_status()))
+    
+    # Jalankan segera
+    await cek_domain()
+    await kirim_status()
 
-async def main():
-    await cek_blokir()
+    # Loop utama
     while True:
         schedule.run_pending()
-        await asyncio.sleep(60)
+        await asyncio.sleep(1)
 
 if __name__ == "__main__":
-    schedule.every(1).minutes.do(lambda: asyncio.create_task(cek_blokir()))
-    asyncio.run(main())
+    try:
+        asyncio.run(tugas_utama())
+    except Exception as e:
+        logger.error(f"Bot error: {e}")
